@@ -35,6 +35,10 @@ func main() {
 		closer(dial)
 	}()
 
+	replLoop(channel)
+}
+
+func replLoop(channel *amqp.Channel) {
 	for {
 		input := gamelogic.GetInput()
 		if len(input) == 0 {
@@ -42,20 +46,21 @@ func main() {
 		}
 
 		firstWord := input[0]
-		if firstWord == "pause" {
+		switch {
+		case firstWord == "pause":
 			log.Println("Pausing the game")
-			if err = publishPauseMessage(channel, true); err != nil {
+			if err := publishPauseMessage(channel, true); err != nil {
 				return
 			}
-		} else if firstWord == "resume" {
+		case firstWord == "resume":
 			log.Println("Resuming the game")
-			if err = publishPauseMessage(channel, false); err != nil {
+			if err := publishPauseMessage(channel, false); err != nil {
 				return
 			}
-		} else if firstWord == "quit" {
+		case firstWord == "quit":
 			log.Println("Bye!")
 			break
-		} else {
+		default:
 			log.Println("What ?!?")
 		}
 	}
