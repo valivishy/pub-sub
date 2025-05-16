@@ -21,7 +21,12 @@ func WriteLog(gamelog routing.GameLog) error {
 	if err != nil {
 		return fmt.Errorf("could not open logs file: %v", err)
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			log.Printf("could not close logs file: %v", err)
+		}
+	}(f)
 
 	str := fmt.Sprintf("%v %v: %v\n", gamelog.CurrentTime.Format(time.RFC3339), gamelog.Username, gamelog.Message)
 	_, err = f.WriteString(str)
