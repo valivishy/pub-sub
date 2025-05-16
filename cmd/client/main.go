@@ -6,6 +6,8 @@ import (
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"os"
+	"os/signal"
 )
 
 const connectionString = "amqp://guest:guest@localhost:5672/"
@@ -26,6 +28,12 @@ func main() {
 	if err != nil {
 		return
 	}
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt)
+	<-signalChan
+	fmt.Println("Received an interrupt, stopping services")
+	closer(dial)
 }
 
 func closer(dial *amqp.Connection) {

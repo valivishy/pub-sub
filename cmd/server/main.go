@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"github.com/bootdotdev/learn-pub-sub-starter/internal/gamelogic"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/pubsub"
 	"github.com/bootdotdev/learn-pub-sub-starter/internal/routing"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"log"
 	"os"
 	"os/signal"
 )
@@ -23,17 +25,44 @@ func main() {
 		panic(err)
 	}
 
-	if err = pubsub.PublishJSON(channel, routing.ExchangePerilDirect, routing.PauseKey, routing.PlayingState{IsPaused: true}); err != nil {
-		return
+	gamelogic.PrintServerHelp()
+
+	go func() {
+		signalChan := make(chan os.Signal, 1)
+		signal.Notify(signalChan, os.Interrupt)
+		<-signalChan
+		fmt.Println("Received an interrupt, stopping services")
+		closer(dial)
+	}()
+
+	for {
+		input := gamelogic.GetInput()
+		if len(input) == 0 {
+			continue
+		}
+
+		firstWord := input[0]
+		if firstWord == "pause" {
+			log.Println("Pausing the game")
+			if err = publishPauseMessage(channel, true); err != nil {
+				return
+			}
+		} else if firstWord == "resume" {
+			log.Println("Resuming the game")
+			if err = publishPauseMessage(channel, false); err != nil {
+				return
+			}
+		} else if firstWord == "quit" {
+			log.Println("Bye!")
+			break
+		} else {
+			log.Println("What ?!?")
+		}
 	}
+}
 
-	fmt.Println("Connected to RabbitMQ")
-
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt)
-	<-signalChan
-	fmt.Println("Received an interrupt, stopping services")
-	closer(dial)
+func publishPauseMessage(channel *amqp.Channel, isPaused bool) error {
+	return pubsub.PublishJSON(channel, routing.ExchangePerilDirect, routing.PauseKey, routing.PlayingState{IsPaused: isPaused})
 }
 
 func closer(dial *amqp.Connection) {
