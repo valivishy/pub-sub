@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 )
 
 const connectionString = "amqp://guest:guest@localhost:5672/"
@@ -22,17 +23,16 @@ func main() {
 
 	username, err := gamelogic.ClientWelcome()
 	if err != nil {
-		return
-	}
-
-	pauseQueueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
-	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient)
-	if err != nil {
-		return
+		panic(err)
 	}
 
 	state := gamelogic.NewGameState(username)
-	err = pubsub.SubscribeJSON(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient, handlerPause(state))
+
+	if err = preparePauseQueue(username, err, dial, state); err != nil {
+		panic(err)
+	}
+
+	err, moveChannel := prepareMoveQueue(state, username, dial)
 	if err != nil {
 		panic(err)
 	}
@@ -45,7 +45,29 @@ func main() {
 		closer(dial)
 	}()
 
-	replLoop(state)
+	replLoop(state, moveChannel)
+}
+
+func prepareMoveQueue(state *gamelogic.GameState, username string, dial *amqp.Connection) (error, *amqp.Channel) {
+	moveQueueName := fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, username)
+	moveKey := fmt.Sprintf("%s.*", routing.ArmyMovesPrefix)
+
+	channel, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient)
+	if err != nil {
+		return err, nil
+	}
+
+	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient, handlerMove(state)), channel
+}
+
+func preparePauseQueue(username string, err error, dial *amqp.Connection, state *gamelogic.GameState) error {
+	pauseQueueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
+	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient)
+	if err != nil {
+		return err
+	}
+
+	return pubsub.SubscribeJSON(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient, handlerPause(state))
 }
 
 func closer(dial *amqp.Connection) {
@@ -58,7 +80,7 @@ func closer(dial *amqp.Connection) {
 	}
 }
 
-func replLoop(state *gamelogic.GameState) {
+func replLoop(state *gamelogic.GameState, moveChannel *amqp.Channel) {
 	for {
 		input := gamelogic.GetInput()
 		if len(input) == 0 {
@@ -73,7 +95,7 @@ func replLoop(state *gamelogic.GameState) {
 				continue
 			}
 		case firstWord == "move":
-			if move(state, input) {
+			if move(state, moveChannel, input) {
 				continue
 			}
 		case firstWord == "status":
@@ -108,21 +130,40 @@ func spawn(state *gamelogic.GameState, input []string) bool {
 	return false
 }
 
-func move(state *gamelogic.GameState, input []string) bool {
-	if len(input) != 3 {
-		log.Println("usage: move <location> <number_of_units>")
+func move(state *gamelogic.GameState, moveChannel *amqp.Channel, input []string) bool {
+	if len(input) < 3 {
+		log.Println("usage: move <location> <unit_1> <unit_2> ... ")
 		return true
 	}
 
 	location := input[1]
-	units := input[2]
+	units := input[2:]
 
 	log.Printf("Moving %s at %s\n", units, location)
 	if _, err := state.CommandMove(input); err != nil {
 		log.Fatalln(err)
 	}
 
-	log.Printf("Moved units %s to %s\n", units, location)
+	var movedUnits []gamelogic.Unit
+
+	for _, unit := range units {
+		unitId, err := strconv.Atoi(unit)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		movedUnits = append(movedUnits, state.Player.Units[unitId])
+	}
+
+	moveKey := fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, state.Player.Username)
+	if err := pubsub.PublishJSON(moveChannel, routing.ExchangePerilTopic, moveKey, gamelogic.ArmyMove{
+		Player:     state.Player,
+		Units:      movedUnits,
+		ToLocation: gamelogic.Location(location),
+	}); err != nil {
+		log.Fatalln(err)
+	}
+
+	log.Printf("Moved units %s to %s, and published successfully. \n", units, location)
 
 	return false
 }
@@ -132,5 +173,13 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
 		defer fmt.Print("> ")
 
 		gs.HandlePause(state)
+	}
+}
+
+func handlerMove(gs *gamelogic.GameState) func(armyMove gamelogic.ArmyMove) {
+	return func(armyMove gamelogic.ArmyMove) {
+		defer fmt.Print("> ")
+
+		gs.HandleMove(armyMove)
 	}
 }
