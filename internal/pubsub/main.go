@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"log"
 )
 
 const (
@@ -43,4 +44,34 @@ func DeclareAndBind(conn *amqp.Connection, exchange, queueName, key string, simp
 	err = channel.QueueBind(queueName, key, exchange, false, nil)
 
 	return channel, queue, err
+}
+
+func SubscribeJSON[T any](conn *amqp.Connection, exchange, queueName, key string, simpleQueueType int, handler func(T)) error {
+	channel, queue, err := DeclareAndBind(conn, exchange, queueName, key, simpleQueueType)
+	if err != nil {
+		return err
+	}
+
+	consume, err := channel.Consume(queue.Name, "", false, false, false, false, nil)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for delivery := range consume {
+			var target T
+			err = json.Unmarshal(delivery.Body, &target)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			handler(target)
+			err = delivery.Ack(true)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+	}()
+
+	return nil
 }

@@ -27,7 +27,7 @@ func main() {
 
 	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, routing.GameLogSlug, fmt.Sprintf("%s.*", routing.GameLogSlug), pubsub.QueueTypeDurable)
 	if err != nil {
-		return
+		panic(err)
 	}
 
 	gamelogic.PrintServerHelp()

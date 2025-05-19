@@ -25,12 +25,18 @@ func main() {
 		return
 	}
 
-	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilDirect, fmt.Sprintf("%s.%s", routing.PauseKey, username), routing.PauseKey, pubsub.QueueTypeTransient)
+	pauseQueueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
+	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient)
 	if err != nil {
 		return
 	}
 
 	state := gamelogic.NewGameState(username)
+	err = pubsub.SubscribeJSON(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient, handlerPause(state))
+	if err != nil {
+		panic(err)
+	}
+
 	go func() {
 		signalChan := make(chan os.Signal, 1)
 		signal.Notify(signalChan, os.Interrupt)
@@ -119,4 +125,12 @@ func move(state *gamelogic.GameState, input []string) bool {
 	log.Printf("Moved units %s to %s\n", units, location)
 
 	return false
+}
+
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
+	return func(state routing.PlayingState) {
+		defer fmt.Print("> ")
+
+		gs.HandlePause(state)
+	}
 }
