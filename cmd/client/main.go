@@ -168,18 +168,29 @@ func move(state *gamelogic.GameState, moveChannel *amqp.Channel, input []string)
 	return false
 }
 
-func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) {
-	return func(state routing.PlayingState) {
+func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.AckType {
+	return func(state routing.PlayingState) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		gs.HandlePause(state)
+
+		return pubsub.Ack
 	}
 }
 
-func handlerMove(gs *gamelogic.GameState) func(armyMove gamelogic.ArmyMove) {
-	return func(armyMove gamelogic.ArmyMove) {
+func handlerMove(gs *gamelogic.GameState) func(armyMove gamelogic.ArmyMove) pubsub.AckType {
+	return func(armyMove gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
-		gs.HandleMove(armyMove)
+		switch gs.HandleMove(armyMove) {
+		case gamelogic.MoveOutComeSafe:
+			fallthrough
+		case gamelogic.MoveOutcomeMakeWar:
+			return pubsub.Ack
+		case gamelogic.MoveOutcomeSamePlayer:
+			fallthrough
+		default:
+			return pubsub.NackDiscard
+		}
 	}
 }
