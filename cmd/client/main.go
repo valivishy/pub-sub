@@ -28,12 +28,16 @@ func main() {
 
 	state := gamelogic.NewGameState(username)
 
-	if err = preparePauseQueue(username, err, dial, state); err != nil {
+	if err = preparePauseQueue(username, dial, state); err != nil {
 		panic(err)
 	}
 
-	err, moveChannel := prepareMoveQueue(state, username, dial)
+	err, moveChannel := prepareMoveQueue(state, dial)
 	if err != nil {
+		panic(err)
+	}
+
+	if err = prepareWarQueue(state, dial); err != nil {
 		panic(err)
 	}
 
@@ -48,8 +52,8 @@ func main() {
 	replLoop(state, moveChannel)
 }
 
-func prepareMoveQueue(state *gamelogic.GameState, username string, dial *amqp.Connection) (error, *amqp.Channel) {
-	moveQueueName := fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, username)
+func prepareMoveQueue(state *gamelogic.GameState, dial *amqp.Connection) (error, *amqp.Channel) {
+	moveQueueName := fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, state.Player.Username)
 	moveKey := fmt.Sprintf("%s.*", routing.ArmyMovesPrefix)
 
 	channel, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient)
@@ -57,17 +61,28 @@ func prepareMoveQueue(state *gamelogic.GameState, username string, dial *amqp.Co
 		return err, nil
 	}
 
-	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient, handlerMove(state)), channel
+	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient, handlerMove(state, channel)), channel
 }
 
-func preparePauseQueue(username string, err error, dial *amqp.Connection, state *gamelogic.GameState) error {
+func preparePauseQueue(username string, dial *amqp.Connection, state *gamelogic.GameState) error {
 	pauseQueueName := fmt.Sprintf("%s.%s", routing.PauseKey, username)
-	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient)
+	_, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient)
 	if err != nil {
 		return err
 	}
 
 	return pubsub.SubscribeJSON(dial, routing.ExchangePerilDirect, pauseQueueName, routing.PauseKey, pubsub.QueueTypeTransient, handlerPause(state))
+}
+
+func prepareWarQueue(state *gamelogic.GameState, dial *amqp.Connection) error {
+	warKey := fmt.Sprintf("%s.*", routing.WarRecognitionsPrefix)
+
+	_, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, warKey, pubsub.QueueTypeDurable)
+	if err != nil {
+		return err
+	}
+
+	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, warKey, pubsub.QueueTypeDurable, handlerWar(state))
 }
 
 func closer(dial *amqp.Connection) {
@@ -178,18 +193,50 @@ func handlerPause(gs *gamelogic.GameState) func(routing.PlayingState) pubsub.Ack
 	}
 }
 
-func handlerMove(gs *gamelogic.GameState) func(armyMove gamelogic.ArmyMove) pubsub.AckType {
+func handlerMove(gs *gamelogic.GameState, moveChannel *amqp.Channel) func(armyMove gamelogic.ArmyMove) pubsub.AckType {
 	return func(armyMove gamelogic.ArmyMove) pubsub.AckType {
 		defer fmt.Print("> ")
 
 		switch gs.HandleMove(armyMove) {
 		case gamelogic.MoveOutComeSafe:
-			fallthrough
+
+			return pubsub.Ack
 		case gamelogic.MoveOutcomeMakeWar:
+			key := fmt.Sprintf("%s.%s", routing.WarRecognitionsPrefix, gs.Player.Username)
+			if err := pubsub.PublishJSON(moveChannel, routing.ExchangePerilTopic, key, gamelogic.RecognitionOfWar{
+				Attacker: gs.Player,
+				Defender: gamelogic.Player{},
+			}); err != nil {
+				return pubsub.NackRequeue
+			}
+
 			return pubsub.Ack
 		case gamelogic.MoveOutcomeSamePlayer:
 			fallthrough
 		default:
+			return pubsub.NackDiscard
+		}
+	}
+}
+
+func handlerWar(gs *gamelogic.GameState) func(recognitionOfWar gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(recognitionOfWar gamelogic.RecognitionOfWar) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		outcome, _, _ := gs.HandleWar(recognitionOfWar)
+		switch outcome {
+		case gamelogic.WarOutcomeNotInvolved:
+			return pubsub.NackRequeue
+		case gamelogic.WarOutcomeNoUnits:
+			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeYouWon:
+			fallthrough
+		case gamelogic.WarOutcomeOpponentWon:
+			fallthrough
+		case gamelogic.WarOutcomeDraw:
+			return pubsub.Ack
+		default:
+			log.Println("Unknown outcome")
 			return pubsub.NackDiscard
 		}
 	}
