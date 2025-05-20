@@ -25,7 +25,7 @@ func main() {
 		panic(err)
 	}
 
-	_, _, err = pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, routing.GameLogSlug, fmt.Sprintf("%s.*", routing.GameLogSlug), pubsub.QueueTypeDurable)
+	err = declareAndBindLogQueue(dial)
 	if err != nil {
 		panic(err)
 	}
@@ -43,6 +43,15 @@ func main() {
 	replLoop(channel)
 }
 
+func declareAndBindLogQueue(dial *amqp.Connection) error {
+	_, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, routing.GameLogSlug, fmt.Sprintf("%s.*", routing.GameLogSlug), pubsub.QueueTypeDurable)
+	if err != nil {
+		return err
+	}
+
+	return pubsub.SubscribeGob(dial, routing.ExchangePerilTopic, routing.GameLogSlug, fmt.Sprintf("%s.*", routing.GameLogSlug), pubsub.QueueTypeDurable, handlerLogs())
+}
+
 func replLoop(channel *amqp.Channel) {
 	for {
 		input := gamelogic.GetInput()
@@ -51,20 +60,20 @@ func replLoop(channel *amqp.Channel) {
 		}
 
 		firstWord := input[0]
-		switch {
-		case firstWord == "pause":
+		switch firstWord {
+		case "pause":
 			log.Println("Pausing the game")
 			if err := publishPauseMessage(channel, true); err != nil {
 				return
 			}
-		case firstWord == "resume":
+		case "resume":
 			log.Println("Resuming the game")
 			if err := publishPauseMessage(channel, false); err != nil {
 				return
 			}
-		case firstWord == "quit":
+		case "quit":
 			log.Println("Bye!")
-			break
+			return
 		default:
 			log.Println("What ?!?")
 		}
@@ -82,5 +91,17 @@ func closer(dial *amqp.Connection) {
 
 	if err := dial.Close(); err != nil {
 		panic(err)
+	}
+}
+
+func handlerLogs() func(gameLog routing.GameLog) pubsub.AckType {
+	return func(gameLog routing.GameLog) pubsub.AckType {
+		defer fmt.Print("> ")
+
+		if err := gamelogic.WriteLog(gameLog); err != nil {
+			log.Printf("Error writing log: %v", err)
+		}
+
+		return pubsub.Ack
 	}
 }

@@ -34,7 +34,7 @@ func main() {
 		panic(err)
 	}
 
-	err, moveChannel := prepareMoveQueue(state, dial)
+	moveChannel, err := prepareMoveQueue(state, dial)
 	if err != nil {
 		panic(err)
 	}
@@ -54,16 +54,16 @@ func main() {
 	replLoop(state, moveChannel)
 }
 
-func prepareMoveQueue(state *gamelogic.GameState, dial *amqp.Connection) (error, *amqp.Channel) {
+func prepareMoveQueue(state *gamelogic.GameState, dial *amqp.Connection) (*amqp.Channel, error) {
 	moveQueueName := fmt.Sprintf("%s.%s", routing.ArmyMovesPrefix, state.Player.Username)
 	moveKey := fmt.Sprintf("%s.*", routing.ArmyMovesPrefix)
 
 	channel, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient)
 	if err != nil {
-		return err, nil
+		return nil, err
 	}
 
-	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient, handlerMove(state, channel)), channel
+	return channel, pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, moveQueueName, moveKey, pubsub.QueueTypeTransient, handlerMove(state, channel))
 }
 
 func preparePauseQueue(username string, dial *amqp.Connection, state *gamelogic.GameState) error {
@@ -106,24 +106,24 @@ func replLoop(state *gamelogic.GameState, moveChannel *amqp.Channel) {
 
 		firstWord := input[0]
 
-		switch {
-		case firstWord == "spawn":
+		switch firstWord {
+		case "spawn":
 			if spawn(state, input) {
 				continue
 			}
-		case firstWord == "move":
+		case "move":
 			if move(state, moveChannel, input) {
 				continue
 			}
-		case firstWord == "status":
+		case "status":
 			state.CommandStatus()
-		case firstWord == "help":
+		case "help":
 			gamelogic.PrintClientHelp()
-		case firstWord == "spam":
+		case "spam":
 			log.Println("Spamming not allowed yet!")
-		case firstWord == "quit":
+		case "quit":
 			gamelogic.PrintQuit()
-			break
+			return
 		default:
 			log.Println("What ?!?")
 		}
