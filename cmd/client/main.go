@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"time"
 )
 
 const connectionString = "amqp://guest:guest@localhost:5672/"
+const errorFormat = "error: %s\n"
 
 func main() {
 	dial, err := amqp.Dial(connectionString)
@@ -77,12 +79,12 @@ func preparePauseQueue(username string, dial *amqp.Connection, state *gamelogic.
 func prepareWarQueue(state *gamelogic.GameState, dial *amqp.Connection) error {
 	warKey := fmt.Sprintf("%s.*", routing.WarRecognitionsPrefix)
 
-	_, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, warKey, pubsub.QueueTypeDurable)
+	channel, _, err := pubsub.DeclareAndBind(dial, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, warKey, pubsub.QueueTypeDurable)
 	if err != nil {
 		return err
 	}
 
-	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, warKey, pubsub.QueueTypeDurable, handlerWar(state))
+	return pubsub.SubscribeJSON(dial, routing.ExchangePerilTopic, routing.WarRecognitionsPrefix, warKey, pubsub.QueueTypeDurable, handlerWar(state, channel))
 }
 
 func closer(dial *amqp.Connection) {
@@ -202,14 +204,19 @@ func handlerMove(gs *gamelogic.GameState, moveChannel *amqp.Channel) func(armyMo
 
 			return pubsub.Ack
 		case gamelogic.MoveOutcomeMakeWar:
-			key := fmt.Sprintf("%s.%s", routing.WarRecognitionsPrefix, gs.Player.Username)
-			if err := pubsub.PublishJSON(moveChannel, routing.ExchangePerilTopic, key, gamelogic.RecognitionOfWar{
-				Attacker: gs.Player,
-				Defender: gamelogic.Player{},
-			}); err != nil {
+			err := pubsub.PublishJSON(
+				moveChannel,
+				routing.ExchangePerilTopic,
+				routing.WarRecognitionsPrefix+"."+gs.GetUsername(),
+				gamelogic.RecognitionOfWar{
+					Attacker: armyMove.Player,
+					Defender: gs.GetPlayerSnap(),
+				},
+			)
+			if err != nil {
+				fmt.Printf(errorFormat, err)
 				return pubsub.NackRequeue
 			}
-
 			return pubsub.Ack
 		case gamelogic.MoveOutcomeSamePlayer:
 			fallthrough
@@ -219,25 +226,63 @@ func handlerMove(gs *gamelogic.GameState, moveChannel *amqp.Channel) func(armyMo
 	}
 }
 
-func handlerWar(gs *gamelogic.GameState) func(recognitionOfWar gamelogic.RecognitionOfWar) pubsub.AckType {
-	return func(recognitionOfWar gamelogic.RecognitionOfWar) pubsub.AckType {
+func handlerWar(gs *gamelogic.GameState, publishCh *amqp.Channel) func(dw gamelogic.RecognitionOfWar) pubsub.AckType {
+	return func(dw gamelogic.RecognitionOfWar) pubsub.AckType {
 		defer fmt.Print("> ")
-
-		outcome, _, _ := gs.HandleWar(recognitionOfWar)
-		switch outcome {
+		warOutcome, winner, loser := gs.HandleWar(dw)
+		switch warOutcome {
 		case gamelogic.WarOutcomeNotInvolved:
 			return pubsub.NackRequeue
 		case gamelogic.WarOutcomeNoUnits:
 			return pubsub.NackDiscard
-		case gamelogic.WarOutcomeYouWon:
-			fallthrough
 		case gamelogic.WarOutcomeOpponentWon:
-			fallthrough
-		case gamelogic.WarOutcomeDraw:
+			err := publishGameLog(
+				publishCh,
+				gs.GetUsername(),
+				fmt.Sprintf("%s won a war against %s", winner, loser),
+			)
+			if err != nil {
+				fmt.Printf(errorFormat, err)
+				return pubsub.NackRequeue
+			}
 			return pubsub.Ack
-		default:
-			log.Println("Unknown outcome")
-			return pubsub.NackDiscard
+		case gamelogic.WarOutcomeYouWon:
+			if err := publishGameLog(
+				publishCh,
+				gs.GetUsername(),
+				fmt.Sprintf("%s won a war against %s", winner, loser),
+			); err != nil {
+				fmt.Printf(errorFormat, err)
+				return pubsub.NackRequeue
+			}
+			return pubsub.Ack
+		case gamelogic.WarOutcomeDraw:
+			err := publishGameLog(
+				publishCh,
+				gs.GetUsername(),
+				fmt.Sprintf("A war between %s and %s resulted in a draw", winner, loser),
+			)
+			if err != nil {
+				fmt.Printf(errorFormat, err)
+				return pubsub.NackRequeue
+			}
+			return pubsub.Ack
 		}
+
+		fmt.Println("error: unknown war outcome")
+		return pubsub.NackDiscard
 	}
+}
+
+func publishGameLog(publishCh *amqp.Channel, username, msg string) error {
+	return pubsub.PublishGob(
+		publishCh,
+		routing.ExchangePerilTopic,
+		routing.GameLogSlug+"."+username,
+		routing.GameLog{
+			Username:    username,
+			CurrentTime: time.Now(),
+			Message:     msg,
+		},
+	)
 }
