@@ -120,7 +120,17 @@ func replLoop(state *gamelogic.GameState, moveChannel *amqp.Channel) {
 		case "help":
 			gamelogic.PrintClientHelp()
 		case "spam":
-			log.Println("Spamming not allowed yet!")
+			number, err := strconv.Atoi(input[1])
+			if err != nil {
+				panic(err)
+			}
+			for i := 0; i < number; i++ {
+				err = publishGameLog(moveChannel, state.Player.Username, gamelogic.GetMaliciousLog())
+				if err != nil {
+					panic(err)
+				}
+			}
+
 		case "quit":
 			gamelogic.PrintQuit()
 			return
